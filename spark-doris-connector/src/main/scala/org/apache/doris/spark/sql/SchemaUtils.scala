@@ -125,7 +125,15 @@ private[spark] object SchemaUtils {
    */
   def convertToSchema(tscanColumnDescs: Seq[TScanColumnDesc]): Schema = {
     val schema = new Schema(tscanColumnDescs.length)
-    tscanColumnDescs.foreach(desc => schema.put(new Field(desc.getName, desc.getType.name, "", 0, 0, "")))
+    logger.info(s"column size: ${tscanColumnDescs.length}")
+    tscanColumnDescs.foreach(desc => {
+      if (desc == null) {
+        logger.info("desc is null")
+      }
+      logger.info(s"descName: ${desc.getName}")
+      logger.info(s"descTypeName: ${desc.getType.name}")
+      schema.put(new Field(desc.getName, desc.getType.name, "", 0, 0, ""))
+    })
     schema
   }
 }
