@@ -140,4 +140,9 @@ public interface ConfigurationOptions {
     String LOAD_MODE = "doris.sink.load.mode";
     String DEFAULT_LOAD_MODE = "stream_load";
 
+    String DORIS_READ_MODE = "doris.read.mode";
+    String DORIS_READ_MODE_DEFAULT = "thrift";
+
+    String DORIS_ARROW_FLIGHT_SQL_PORT = "doris.arrow-flight-sql.port";
+
 }

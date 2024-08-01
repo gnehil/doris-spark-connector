@@ -45,6 +45,7 @@ import org.apache.arrow.vector.complex.ListVector;
 import org.apache.arrow.vector.complex.MapVector;
 import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.complex.impl.UnionMapReader;
+import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import org.apache.arrow.vector.types.Types;
 import org.apache.commons.lang3.ArrayUtils;
@@ -83,60 +84,26 @@ public class RowBatch {
             .appendPattern("yyyy-MM-dd HH:mm:ss")
             .appendFraction(ChronoField.MICRO_OF_SECOND, 0, 6, true)
             .toFormatter();
-
-    public static class Row {
-        private final List<Object> cols;
-
-        Row(int colCount) {
-            this.cols = new ArrayList<>(colCount);
-        }
-
-        List<Object> getCols() {
-            return cols;
-        }
-
-        public void put(Object o) {
-            cols.add(o);
-        }
-    }
-
+    private final List<Row> rowBatch = new ArrayList<>();
+    private final ArrowReader arrowReader;
+    private final Schema schema;
     // offset for iterate the rowBatch
     private int offsetInRowBatch = 0;
     private int rowCountInOneBatch = 0;
     private int readRowCount = 0;
-    private final List<Row> rowBatch = new ArrayList<>();
-    private final ArrowStreamReader arrowStreamReader;
     private List<FieldVector> fieldVectors;
-    private final RootAllocator rootAllocator;
-    private final Schema schema;
+    private RootAllocator rootAllocator = null;
 
     public RowBatch(TScanBatchResult nextResult, Schema schema) throws DorisException {
-        this.schema = schema;
+
         this.rootAllocator = new RootAllocator(Integer.MAX_VALUE);
-        this.arrowStreamReader = new ArrowStreamReader(
-                new ByteArrayInputStream(nextResult.getRows()),
-                rootAllocator
-        );
+        this.arrowReader = new ArrowStreamReader(new ByteArrayInputStream(nextResult.getRows()), rootAllocator);
+        this.schema = schema;
+
         try {
-            VectorSchemaRoot root = arrowStreamReader.getVectorSchemaRoot();
-            while (arrowStreamReader.loadNextBatch()) {
-                fieldVectors = root.getFieldVectors();
-                if (fieldVectors.size() > schema.size()) {
-                    logger.error("Data schema size '{}' should not be bigger than arrow field size '{}'.",
-                            schema.size(), fieldVectors.size());
-                    throw new DorisException("Load Doris data failed, schema size of fetch data is wrong.");
-                }
-                if (fieldVectors.isEmpty() || root.getRowCount() == 0) {
-                    logger.debug("One batch in arrow has no data.");
-                    continue;
-                }
-                rowCountInOneBatch = root.getRowCount();
-                // init the rowBatch
-                for (int i = 0; i < rowCountInOneBatch; ++i) {
-                    rowBatch.add(new Row(fieldVectors.size()));
-                }
-                convertArrowToRowBatch();
-                readRowCount += root.getRowCount();
+            VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
+            while (arrowReader.loadNextBatch()) {
+                readBatch(root);
             }
         } catch (Exception e) {
             logger.error("Read Doris Data failed because: ", e);
@@ -144,6 +111,42 @@ public class RowBatch {
         } finally {
             close();
         }
+
+    }
+
+    public RowBatch(ArrowReader reader, Schema schema) throws DorisException {
+
+        this.arrowReader = reader;
+        this.schema = schema;
+
+        try {
+            VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
+            readBatch(root);
+        } catch (Exception e) {
+            logger.error("Read Doris Data failed because: ", e);
+            throw new DorisException(e.getMessage());
+        }
+
+    }
+
+    private void readBatch(VectorSchemaRoot root) throws DorisException {
+        fieldVectors = root.getFieldVectors();
+        if (fieldVectors.size() > schema.size()) {
+            logger.error("Data schema size '{}' should not be bigger than arrow field size '{}'.",
+                    schema.size(), fieldVectors.size());
+            throw new DorisException("Load Doris data failed, schema size of fetch data is wrong.");
+        }
+        if (fieldVectors.isEmpty() || root.getRowCount() == 0) {
+            logger.debug("One batch in arrow has no data.");
+            return;
+        }
+        rowCountInOneBatch = root.getRowCount();
+        // init the rowBatch
+        for (int i = 0; i < rowCountInOneBatch; ++i) {
+            rowBatch.add(new Row(fieldVectors.size()));
+        }
+        convertArrowToRowBatch();
+        readRowCount += root.getRowCount();
     }
 
     public boolean hasNext() {
@@ -501,14 +504,30 @@ public class RowBatch {
 
     public void close() {
         try {
-            if (arrowStreamReader != null) {
-                arrowStreamReader.close();
+            if (arrowReader != null) {
+                arrowReader.close();
             }
             if (rootAllocator != null) {
                 rootAllocator.close();
             }
         } catch (IOException ioe) {
             // do nothing
+        }
+    }
+
+    public static class Row {
+        private final List<Object> cols;
+
+        Row(int colCount) {
+            this.cols = new ArrayList<>(colCount);
+        }
+
+        List<Object> getCols() {
+            return cols;
+        }
+
+        public void put(Object o) {
+            cols.add(o);
         }
     }
 }
