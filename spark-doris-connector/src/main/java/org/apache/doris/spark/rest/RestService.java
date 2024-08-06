@@ -17,6 +17,7 @@
 
 package org.apache.doris.spark.rest;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import static org.apache.doris.spark.cfg.ConfigurationOptions.DORIS_BENODES;
 import static org.apache.doris.spark.cfg.ConfigurationOptions.DORIS_FENODES;
 import static org.apache.doris.spark.cfg.ConfigurationOptions.DORIS_REQUEST_AUTH_PASSWORD;
@@ -489,7 +490,7 @@ public class RestService implements Serializable {
      * @throws IllegalArgumentException BE nodes is illegal
      */
     @VisibleForTesting
-    public static List<BackendV2.BackendRowV2> getBackendRows(SparkSettings sparkSettings,  Logger logger) throws DorisException {
+    public static List<BackendV2.BackendRowV2> getBackendRows(SparkSettings sparkSettings, Logger logger) throws DorisException {
         if (StringUtils.isNoneBlank(sparkSettings.getProperty(DORIS_BENODES))) {
             return getBeNodes(sparkSettings, logger);
         } else { // If the specified BE does not exist, the FE mode is used
@@ -501,6 +502,25 @@ public class RestService implements Serializable {
             if (backends == null || backends.isEmpty()) {
                 logger.error(ILLEGAL_ARGUMENT_MESSAGE, "benodes", backends);
                 throw new IllegalArgumentException("benodes", String.valueOf(backends));
+            }
+            if (StringUtils.isNotBlank(sparkSettings.getProperty(ConfigurationOptions.DORIS_NODE_MAPPINGS))) {
+                try {
+                    Map<String, String> nodeMappings =
+                            MAPPER.readValue(sparkSettings.getProperty(ConfigurationOptions.DORIS_NODE_MAPPINGS),
+                                    new TypeReference<HashMap<String, String>>() {
+                                    });
+                    backends.forEach(backend -> {
+                        if (nodeMappings.containsKey(backend.getIp() + ":" + backend.getHttpPort())) {
+                            String[] node = nodeMappings.get(backend.getIp() + ":" + backend.getHttpPort()).split(":");
+                            String ip = node[0];
+                            int port = Integer.parseInt(node[1]);
+                            backend.setIp(ip);
+                            backend.setHttpPort(port);
+                        }
+                    });
+                } catch (JsonProcessingException e) {
+                    throw new RuntimeException(e);
+                }
             }
             return backends;
         }
@@ -622,6 +642,22 @@ public class RestService implements Serializable {
     private static String queryAllFrontends(SparkSettings settings, BiFunction<String, Boolean, HttpUriRequest> func,
                                           Logger logger) throws DorisException {
         List<String> frontends = allEndpoints(settings.getProperty(DORIS_FENODES), logger);
+        if (StringUtils.isNotBlank(settings.getProperty(ConfigurationOptions.DORIS_NODE_MAPPINGS))) {
+            try {
+                Map<String, String> nodeMappings =
+                        MAPPER.readValue(settings.getProperty(ConfigurationOptions.DORIS_NODE_MAPPINGS),
+                                new TypeReference<HashMap<String, String>>() {
+                                });
+                frontends = frontends.stream().map(feNode -> {
+                    if (nodeMappings.containsKey(feNode)) {
+                        return nodeMappings.get(feNode);
+                    }
+                    return feNode;
+                }).collect(Collectors.toList());
+            } catch (JsonProcessingException e) {
+                throw new RuntimeException(e);
+            }
+        }
         boolean enableHttps = settings.getBooleanProperty(ConfigurationOptions.DORIS_ENABLE_HTTPS,
                 ConfigurationOptions.DORIS_ENABLE_HTTPS_DEFAULT);
         CloseableHttpClient client = HttpUtil.getHttpClient(settings);

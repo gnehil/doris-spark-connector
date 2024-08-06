@@ -140,4 +140,6 @@ public interface ConfigurationOptions {
     String LOAD_MODE = "doris.sink.load.mode";
     String DEFAULT_LOAD_MODE = "stream_load";
 
+    String DORIS_NODE_MAPPINGS = "doris.node.mappings";
+
 }

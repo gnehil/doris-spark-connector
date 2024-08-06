@@ -17,17 +17,27 @@
 
 package org.apache.doris.spark.util
 
+import com.fasterxml.jackson.databind.json.JsonMapper
+import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import org.apache.doris.spark.cfg.{ConfigurationOptions, SparkSettings}
+import org.apache.http.HttpHost
 import org.apache.http.client.config.RequestConfig
+import org.apache.http.client.utils.URIUtils
 import org.apache.http.conn.ssl.{SSLConnectionSocketFactory, TrustAllStrategy}
 import org.apache.http.impl.client.{CloseableHttpClient, DefaultRedirectStrategy, HttpClients}
 import org.apache.http.ssl.SSLContexts
+import org.slf4j.LoggerFactory
 
 import java.io.{File, FileInputStream}
+import java.net.URI
 import java.security.KeyStore
+import scala.collection.immutable.HashMap
 import scala.util.{Failure, Success, Try}
 
 object HttpUtil {
+
+  private val logger = LoggerFactory.getLogger("HttpUtil")
+  private val mapper = JsonMapper.builder().addModule(new DefaultScalaModule).build()
 
   def getHttpClient(settings: SparkSettings): CloseableHttpClient = {
     val connectTimeout = settings.getIntegerProperty(ConfigurationOptions.DORIS_REQUEST_CONNECT_TIMEOUT_MS,
@@ -38,6 +48,25 @@ object HttpUtil {
     val clientBuilder = HttpClients.custom()
       .setRedirectStrategy(new DefaultRedirectStrategy {
         override def isRedirectable(method: String): Boolean = true
+
+        override def createLocationURI(location: String): URI = {
+          var uri = super.createLocationURI(location)
+          if (settings.getBooleanProperty(ConfigurationOptions.DORIS_SINK_AUTO_REDIRECT,
+            ConfigurationOptions.DORIS_SINK_AUTO_REDIRECT_DEFAULT)) {
+            Option(settings.getProperty(ConfigurationOptions.DORIS_NODE_MAPPINGS)) match {
+              case Some(mappings) =>
+                val nodeMappings = mapper.readValue(mappings, classOf[HashMap[String, String]])
+                val node = s"${uri.getHost}:${uri.getPort}"
+                if (nodeMappings.contains(node)) {
+                  val originalURI = uri
+                  uri = URIUtils.rewriteURI(uri, new HttpHost(nodeMappings(node)))
+                  logger.info(s"rewrite redirect uri, origin: ${originalURI.toString}, current: ${uri.toString}")
+                }
+              case _ => // do nothing
+            }
+          }
+          uri
+        }
       })
       .setDefaultRequestConfig(requestConfig)
     val enableHttps = settings.getBooleanProperty("doris.enable.https", false)
