@@ -107,9 +107,6 @@ public class DorisConfig implements Serializable {
         } else if (options.get(DorisOptions.DORIS_USER.getName()).isEmpty()) {
             throw new IllegalArgumentException("option [" + DorisOptions.DORIS_USER.getName() + "] is empty");
         }
-        if (!options.containsKey(DorisOptions.DORIS_PASSWORD.getName())) {
-            throw new OptionRequiredException(DorisOptions.DORIS_PASSWORD.getName());
-        }
         if ("thrift".equalsIgnoreCase(options.get(DorisOptions.READ_MODE.getName()))) {
             if (Boolean.parseBoolean(options.get(DorisOptions.DORIS_READ_BITMAP_TO_STRING.getName()))) {
                 throw new IllegalArgumentException(String.format("option [%s] is invalid in thrift read mode",

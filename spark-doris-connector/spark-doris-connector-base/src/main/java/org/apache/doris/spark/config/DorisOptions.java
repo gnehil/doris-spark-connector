@@ -39,7 +39,7 @@ public class DorisOptions {
 
     // use password to save doris.request.auth.password
     // reuse credentials mask method in spark ExternalCatalogUtils#maskCredentials
-    public static final ConfigOption<String> DORIS_PASSWORD = ConfigOptions.name("doris.password").stringType().withoutDefaultValue().withDescription("");
+    public static final ConfigOption<String> DORIS_PASSWORD = ConfigOptions.name("doris.password").stringType().defaultValue("").withDescription("");
 
     public static final ConfigOption<Integer> DORIS_REQUEST_RETRIES = ConfigOptions.name("doris.request.retries").intType().defaultValue(3).withDescription("");
     public static final ConfigOption<Integer> DORIS_REQUEST_CONNECT_TIMEOUT_MS = ConfigOptions.name("doris.request.connect.timeout.ms").intType().defaultValue(30 * 1000).withDescription("");
