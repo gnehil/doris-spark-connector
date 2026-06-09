@@ -43,6 +43,10 @@ public class StreamLoadProcessor extends AbstractStreamLoadProcessor<InternalRow
 
     private StructType schema;
 
+    // Physical CSV column order, aligned to the stream load `columns` header (doris.write.fields).
+    // Lazily computed once; identity order when no reordering is needed/safe.
+    private int[] csvWriteFieldIndexes;
+
     public StreamLoadProcessor(DorisConfig config) throws Exception {
         super(config);
         this.schema = new StructType(new StructField[0]);
@@ -78,7 +82,7 @@ public class StreamLoadProcessor extends AbstractStreamLoadProcessor<InternalRow
     public byte[] stringify(InternalRow row, DataFormat format) {
         switch (format) {
             case CSV:
-                return RowConvertors.convertToCsv(row, schema, columnSeparator).getBytes(
+                return RowConvertors.convertToCsv(row, schema, getCsvWriteFieldIndexes(), columnSeparator).getBytes(
                     StandardCharsets.UTF_8);
             case JSON:
                 return RowConvertors.convertToJsonBytes(row, schema);
@@ -101,6 +105,21 @@ public class StreamLoadProcessor extends AbstractStreamLoadProcessor<InternalRow
             }
             return fields.toString();
         }
+    }
+
+    private int[] getCsvWriteFieldIndexes() {
+        if (csvWriteFieldIndexes == null) {
+            String writeFields = null;
+            if (config.contains(DorisOptions.DORIS_WRITE_FIELDS)) {
+                try {
+                    writeFields = config.getValue(DorisOptions.DORIS_WRITE_FIELDS);
+                } catch (OptionRequiredException e) {
+                    // guarded by contains() above; fall back to schema order
+                }
+            }
+            csvWriteFieldIndexes = RowConvertors.computeCsvWriteFieldIndexes(writeFields, schema);
+        }
+        return csvWriteFieldIndexes;
     }
 
     @Override

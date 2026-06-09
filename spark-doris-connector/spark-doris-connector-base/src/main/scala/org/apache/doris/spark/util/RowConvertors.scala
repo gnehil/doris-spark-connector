@@ -40,10 +40,49 @@ object RowConvertors {
   private val NULL_VALUE = "\\N"
 
   def convertToCsv(row: InternalRow, schema: StructType, sep: String): String = {
-    (0 until schema.length).map(i => {
+    convertToCsv(row, schema, schema.indices.toArray, sep)
+  }
+
+  /**
+   * Serialize a row to a CSV line following the given physical column order.
+   *
+   * The stream load `columns` header (derived from `doris.write.fields`) labels the CSV columns
+   * positionally, so the physical CSV order must match that header. Spark may hand the row to us
+   * in an order that differs from `doris.write.fields` (e.g. it aligns the DataFrame to the table
+   * schema by name), which would otherwise mismatch the header. `fieldIndexes` lets the caller
+   * pin the output order to the header.
+   *
+   * @param fieldIndexes for the k-th output column, the index into `schema`/`row` to read from.
+   */
+  def convertToCsv(row: InternalRow, schema: StructType, fieldIndexes: Array[Int], sep: String): String = {
+    fieldIndexes.map(i => {
       val value = asScalaValue(row, schema.fields(i).dataType, i)
       if (value == null) NULL_VALUE else value
     }).mkString(sep)
+  }
+
+  /**
+   * Compute the physical CSV column order so it matches the stream load `columns` header
+   * (i.e. `doris.write.fields`). Returns, for each header column, the index into `schema`.
+   *
+   * Falls back to the schema's natural order (identity) when reordering is not safe/applicable:
+   * `writeFields` is empty; contains derived/expression columns (`=` or `(`, e.g.
+   * `dt=to_date(c)`); is not a complete permutation of the schema fields; or references a name
+   * not present in the schema. This keeps partial-columns / schema-less / derived-column writes
+   * behaving exactly as before.
+   */
+  def computeCsvWriteFieldIndexes(writeFields: String, schema: StructType): Array[Int] = {
+    val identity = schema.indices.toArray
+    if (writeFields == null || writeFields.trim.isEmpty) return identity
+    // Derived/expression columns can't be mapped to a single DataFrame field by name -> don't reorder.
+    if (writeFields.contains("=") || writeFields.contains("(")) return identity
+    val names = writeFields.split(",").map(_.trim.stripPrefix("`").stripSuffix("`")).filter(_.nonEmpty)
+    if (names.length != schema.length) return identity
+    val fieldNames = schema.fieldNames
+    val arr = names.map(fieldNames.indexOf(_))
+    if (arr.exists(_ < 0)) return identity
+    if (arr.distinct.length != arr.length) return identity
+    arr
   }
 
   def convertToJson(row: InternalRow, schema: StructType): String = {

@@ -65,6 +65,55 @@ class RowConvertorsTest {
     Assert.assertEquals("1,2.3,4.5,6,7,8910.1100,2024-01-01,2024-01-01 12:34:56.0,[1,2,3],{\"a\":\"1\"},{\"a\":\"a\",\"b\":1},test", res)
   }
 
+  // schema where v4 comes before v3 (e.g. after Spark aligns the DataFrame to the table by name);
+  // row values follow the schema positions: v4="1d", v3="1c".
+  private def orderRow = InternalRow(1,
+    UTF8String.fromString("1a"), UTF8String.fromString("1b"),
+    UTF8String.fromString("1d"), UTF8String.fromString("1c"))
+
+  private def orderSchema = StructType(Seq(
+    StructField("id", DataTypes.IntegerType),
+    StructField("v1", DataTypes.StringType),
+    StructField("v2", DataTypes.StringType),
+    StructField("v4", DataTypes.StringType),
+    StructField("v3", DataTypes.StringType)))
+
+  @Test def convertToCsvReorderByWriteFields(): Unit = {
+    // doris.write.fields lists the natural v3-before-v4 order -> CSV must follow it
+    val indexes = RowConvertors.computeCsvWriteFieldIndexes("id,v1,v2,v3,v4", orderSchema)
+    Assert.assertArrayEquals(Array(0, 1, 2, 4, 3), indexes)
+    val res = RowConvertors.convertToCsv(orderRow, orderSchema, indexes, ",")
+    // v3's value (1c) before v4's value (1d) -> matches the `columns` header order
+    Assert.assertEquals("1,1a,1b,1c,1d", res)
+  }
+
+  @Test def convertToCsvReorderBacktickedAndPermuted(): Unit = {
+    // backticked names are tolerated; same target order
+    val indexes = RowConvertors.computeCsvWriteFieldIndexes("`id`,`v1`,`v2`,`v3`,`v4`", orderSchema)
+    Assert.assertArrayEquals(Array(0, 1, 2, 4, 3), indexes)
+  }
+
+  @Test def computeCsvWriteFieldIndexesFallsBackToIdentity(): Unit = {
+    val identity = Array(0, 1, 2, 3, 4)
+    // unset
+    Assert.assertArrayEquals(identity, RowConvertors.computeCsvWriteFieldIndexes(null, orderSchema))
+    Assert.assertArrayEquals(identity, RowConvertors.computeCsvWriteFieldIndexes("  ", orderSchema))
+    // derived / expression columns -> don't reorder
+    Assert.assertArrayEquals(identity,
+      RowConvertors.computeCsvWriteFieldIndexes("id,v1,v2,v3,v4=to_bitmap(v4)", orderSchema))
+    // not a complete permutation (subset)
+    Assert.assertArrayEquals(identity,
+      RowConvertors.computeCsvWriteFieldIndexes("id,v1,v2", orderSchema))
+    // unknown column name
+    Assert.assertArrayEquals(identity,
+      RowConvertors.computeCsvWriteFieldIndexes("id,v1,v2,v3,vx", orderSchema))
+    // identity indexes serialize exactly like the legacy 3-arg overload
+    Assert.assertEquals(
+      RowConvertors.convertToCsv(orderRow, orderSchema, ","),
+      RowConvertors.convertToCsv(orderRow, orderSchema,
+        RowConvertors.computeCsvWriteFieldIndexes(null, orderSchema), ","))
+  }
+
   @Test def convertToJson(): Unit = {
 
     val row = InternalRow(
