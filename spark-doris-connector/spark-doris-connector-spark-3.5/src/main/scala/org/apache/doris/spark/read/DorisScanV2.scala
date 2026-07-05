@@ -17,11 +17,17 @@
 
 package org.apache.doris.spark.read
 
+import org.apache.doris.spark.client.entity.DorisColumnStats
 import org.apache.doris.spark.config.{DorisConfig, DorisOptions}
-import org.apache.doris.spark.read.expression.V2ExpressionBuilder
+import org.apache.doris.spark.read.expression.{V2ExpressionBuilder, V2ToV1FilterAdapter}
+import org.apache.doris.spark.read.stats.DorisStatisticsWithColumns
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.connector.expressions.filter.Predicate
+import org.apache.spark.sql.connector.read.Statistics
+import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
+
+import java.util.{Map => JMap, OptionalLong}
 
 class DorisScanV2(config: DorisConfig, schema: StructType, filters: Array[Predicate], limit: Int) extends AbstractDorisScan(config, schema) with Logging {
   override protected def compiledFilters(): Array[String] = {
@@ -31,4 +37,23 @@ class DorisScanV2(config: DorisConfig, schema: StructType, filters: Array[Predic
   }
 
   override protected def getLimit: Int = limit
+
+  /** Convert V2 predicates to V1 filters for selectivity estimation. */
+  override protected def selectivityFilters(): Array[Filter] = V2ToV1FilterAdapter.convert(filters)
+
+  /**
+   * Spark 3.5+ supports column-level statistics via [[Statistics#columnStats]].
+   * Return a [[DorisStatisticsWithColumns]] when column stats are available.
+   */
+  override protected def buildStatistics(
+      numRows: OptionalLong,
+      sizeInBytes: OptionalLong,
+      colStats: JMap[String, DorisColumnStats],
+      effectiveRows: Long): Statistics = {
+    if (colStats != null && !colStats.isEmpty) {
+      new DorisStatisticsWithColumns(numRows, sizeInBytes, colStats, schema, effectiveRows)
+    } else {
+      new org.apache.doris.spark.read.stats.DorisStatistics(numRows, sizeInBytes)
+    }
+  }
 }

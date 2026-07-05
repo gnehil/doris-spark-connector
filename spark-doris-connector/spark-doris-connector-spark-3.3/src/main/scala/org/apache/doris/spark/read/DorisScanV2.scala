@@ -18,9 +18,10 @@
 package org.apache.doris.spark.read
 
 import org.apache.doris.spark.config.{DorisConfig, DorisOptions}
-import org.apache.doris.spark.read.expression.V2ExpressionBuilder
+import org.apache.doris.spark.read.expression.{V2ExpressionBuilder, V2ToV1FilterAdapter}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.connector.expressions.filter.Predicate
+import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
 
 class DorisScanV2(config: DorisConfig, schema: StructType, filters: Array[Predicate], limit: Int) extends AbstractDorisScan(config, schema) with Logging {
@@ -31,4 +32,7 @@ class DorisScanV2(config: DorisConfig, schema: StructType, filters: Array[Predic
   }
 
   override protected def getLimit: Int = limit
+
+  /** Convert V2 predicates to V1 filters for selectivity estimation. */
+  override protected def selectivityFilters(): Array[Filter] = V2ToV1FilterAdapter.convert(filters)
 }

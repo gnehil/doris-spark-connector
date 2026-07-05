@@ -240,12 +240,18 @@
             <version>${fasterxml.jackson.version}</version>
         </dependency>
 
-        <!-- https://mvnrepository.com/artifact/com.mysql/mysql-connector-j -->
+        <!--
+            mysql-connector-j is GPLv2+FOSS-exception (Apache Category X).
+            Kept as `provided` so it is NOT shipped in the fat jar. Users must
+            place the driver on their Spark classpath if they enable
+            doris.stats.enabled. When the driver is absent, the stats path
+            silently no-ops (returns empty), keeping the read path intact.
+        -->
         <dependency>
             <groupId>com.mysql</groupId>
             <artifactId>mysql-connector-j</artifactId>
             <version>8.0.33</version>
-            <scope>test</scope>
+            <scope>provided</scope>
         </dependency>
 
         <dependency>

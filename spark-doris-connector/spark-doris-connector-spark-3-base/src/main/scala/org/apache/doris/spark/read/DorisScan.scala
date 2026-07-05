@@ -30,4 +30,7 @@ class DorisScan(config: DorisConfig, schema: StructType, filters: Array[Filter])
     val inValueLengthLimit = config.getValue(DorisOptions.DORIS_FILTER_QUERY_IN_MAX_COUNT)
     filters.map(DorisDialects.compileFilter(_, inValueLengthLimit)).filter(_.isDefined).map(_.get)
   }
+
+  /** V1 filters are already available; return them directly for selectivity estimation. */
+  override protected def selectivityFilters(): Array[Filter] = filters
 }

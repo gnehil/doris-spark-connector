@@ -18,7 +18,10 @@
 package org.apache.doris.spark.client;
 
 import org.apache.doris.spark.client.entity.Backend;
+import org.apache.doris.spark.client.entity.DorisColumnStats;
+import org.apache.doris.spark.client.entity.DorisTableStats;
 import org.apache.doris.spark.client.entity.Frontend;
+import org.apache.doris.spark.client.stats.DorisStatsCache;
 import org.apache.doris.spark.config.DorisConfig;
 import org.apache.doris.spark.config.DorisOptions;
 import org.apache.doris.spark.exception.DorisException;
@@ -56,6 +59,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -64,6 +68,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -588,6 +593,328 @@ public class DorisFrontendClient implements Serializable {
 
     public LoadBalanceList<Frontend> getFrontends() {
         return frontends;
+    }
+
+    // ------------------------------------------------------------------
+    // Statistics
+    // ------------------------------------------------------------------
+
+    /**
+     * Fetch table-level statistics via {@code SHOW TABLE STATS}.
+     *
+     * <p>Uses a dedicated JDBC connection with connect/socket timeouts from stats options.
+     * Results are cached in {@link DorisStatsCache}. On any failure, returns
+     * {@link Optional#empty()} and caches it to avoid repeated warnings within TTL.
+     */
+    public Optional<DorisTableStats> fetchTableStats(String db, String table) {
+        if (!isStatsAvailable()) {
+            return Optional.empty();
+        }
+        String feKey = buildFeKey();
+        String key = DorisStatsCache.tableKey(feKey, db, table);
+        long ttlMs;
+        try {
+            ttlMs = config.getValue(DorisOptions.DORIS_STATS_CACHE_TTL_MS);
+        } catch (OptionRequiredException e) {
+            return Optional.empty();
+        }
+        DorisStatsCache cache = DorisStatsCache.getInstance(ttlMs);
+        Optional<DorisTableStats> cached = cache.getTableStats(key);
+        if (cached != null) {
+            return cached;
+        }
+        Optional<DorisTableStats> result;
+        try {
+            result = queryFrontendsForStats(conn -> {
+                try {
+                    return fetchTableStatsInternal(conn, db, table);
+                } catch (SQLException e) {
+                    throw new RuntimeException("fetch table stats failed", e);
+                }
+            });
+        } catch (Exception e) {
+            LOG.warn("fetch table stats for {}.{} failed (stats reporting will be skipped): {}", db, table, e.getMessage());
+            result = Optional.empty();
+        }
+        cache.putTableStats(key, result);
+        return result;
+    }
+
+    /**
+     * Fetch column-level statistics via {@code SHOW COLUMN STATS}.
+     *
+     * <p>When {@code cols} is non-empty, only those columns are requested. Results are cached
+     * in {@link DorisStatsCache}. On any failure, returns an empty map and caches it.
+     */
+    public Map<String, DorisColumnStats> fetchColumnStats(String db, String table, List<String> cols) {
+        if (!isStatsAvailable()) {
+            return Collections.emptyMap();
+        }
+        String feKey = buildFeKey();
+        List<String> sorted = cols == null ? Collections.emptyList() : cols.stream().sorted().collect(Collectors.toList());
+        int colsHash = sorted.hashCode();
+        String key = DorisStatsCache.columnKey(feKey, db, table, colsHash);
+        long ttlMs;
+        try {
+            ttlMs = config.getValue(DorisOptions.DORIS_STATS_CACHE_TTL_MS);
+        } catch (OptionRequiredException e) {
+            return Collections.emptyMap();
+        }
+        DorisStatsCache cache = DorisStatsCache.getInstance(ttlMs);
+        Map<String, DorisColumnStats> cached = cache.getColumnStats(key);
+        if (cached != null) {
+            return cached;
+        }
+        Map<String, DorisColumnStats> result;
+        try {
+            result = queryFrontendsForStats(conn -> {
+                try {
+                    return fetchColumnStatsInternal(conn, db, table, sorted);
+                } catch (SQLException e) {
+                    throw new RuntimeException("fetch column stats failed", e);
+                }
+            });
+        } catch (Exception e) {
+            LOG.warn("fetch column stats for {}.{} failed (column stats will be skipped): {}", db, table, e.getMessage());
+            result = Collections.emptyMap();
+        }
+        cache.putColumnStats(key, result);
+        return result;
+    }
+
+    /** Whether the stats path can run at all: needs a query port and the MySQL driver. */
+    private boolean isStatsAvailable() {
+        for (Frontend fe : frontends) {
+            if (fe.getQueryPort() != -1) {
+                return true;
+            }
+        }
+        LOG.debug("stats skipped: no fe has doris.query.port configured");
+        return false;
+    }
+
+    /** Build a stable cache key from FE endpoints (LoadBalanceList has no stream()). */
+    private String buildFeKey() {
+        StringBuilder sb = new StringBuilder();
+        for (Frontend fe : frontends) {
+            if (sb.length() > 0) {
+                sb.append(",");
+            }
+            sb.append(fe.hostHttpPortString());
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Like {@link #queryFrontends(Function)} but builds the JDBC URL with connect/socket
+     * timeouts from stats options. The per-statement query timeout is applied inside
+     * {@link #fetchTableStatsInternal} / {@link #fetchColumnStatsInternal} on the actual
+     * PreparedStatement that runs the query.
+     *
+     * @throws ClassNotFoundException if the MySQL driver is not on the classpath;
+     *         callers catch this via the generic {@code Exception} handler and return empty.
+     */
+    private <T> T queryFrontendsForStats(Function<Connection, T> function) throws Exception {
+        // Fail fast on missing driver so callers can cache the empty result.
+        try {
+            Class.forName("com.mysql.cj.jdbc.Driver");
+        } catch (ClassNotFoundException e) {
+            try {
+                Class.forName("com.mysql.jdbc.Driver");
+            } catch (ClassNotFoundException e2) {
+                throw new ClassNotFoundException("mysql jdbc driver not on classpath; stats disabled");
+            }
+        }
+        int connectTimeoutMs;
+        int socketTimeoutMs;
+        try {
+            connectTimeoutMs = config.getValue(DorisOptions.DORIS_STATS_JDBC_CONNECT_TIMEOUT_MS);
+            socketTimeoutMs = config.getValue(DorisOptions.DORIS_STATS_JDBC_SOCKET_TIMEOUT_MS);
+        } catch (OptionRequiredException e) {
+            connectTimeoutMs = 3000;
+            socketTimeoutMs = 5000;
+        }
+        Exception ex = null;
+        for (Frontend frontEnd : frontends) {
+            if (frontEnd.getQueryPort() == -1) {
+                continue;
+            }
+            String url = "jdbc:mysql://" + frontEnd.getHost() + ":" + frontEnd.getQueryPort()
+                    + "?connectTimeout=" + connectTimeoutMs
+                    + "&socketTimeout=" + socketTimeoutMs;
+            try (Connection conn = DriverManager.getConnection(url, username, password)) {
+                return function.apply(conn);
+            } catch (SQLException e) {
+                LOG.warn("fe jdbc stats query on {} failed, err: {}", frontEnd.hostQueryPortString(), e.getMessage());
+                ex = e;
+            }
+        }
+        if (ex == null) {
+            ex = new Exception("All frontends failed to execute stats query.");
+        }
+        throw ex;
+    }
+
+    private Optional<DorisTableStats> fetchTableStatsInternal(Connection conn, String db, String table) throws SQLException {
+        String sql = "SHOW TABLE STATS " + quoteIdent(db) + "." + quoteIdent(table);
+        int queryTimeoutS;
+        try {
+            queryTimeoutS = Math.max(1, config.getValue(DorisOptions.DORIS_STATS_JDBC_SOCKET_TIMEOUT_MS) / 1000);
+        } catch (OptionRequiredException e) {
+            queryTimeoutS = 5;
+        }
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setQueryTimeout(queryTimeoutS);
+            try (ResultSet rs = ps.executeQuery()) {
+                ResultSetMetaData md = rs.getMetaData();
+                int rowCountIdx = -1;
+                int dataSizeIdx = -1;
+                for (int i = 1; i <= md.getColumnCount(); i++) {
+                    String colName = md.getColumnName(i);
+                    if ("row_count".equalsIgnoreCase(colName)) {
+                        rowCountIdx = i;
+                    } else if ("data_size".equalsIgnoreCase(colName)) {
+                        dataSizeIdx = i;
+                    }
+                }
+                if (rowCountIdx == -1) {
+                    LOG.debug("SHOW TABLE STATS returned no row_count column for {}.{}", db, table);
+                    return Optional.empty();
+                }
+                if (rs.next()) {
+                    long rowCount = rs.getLong(rowCountIdx);
+                    if (rowCount < 0) {
+                        return Optional.empty();
+                    }
+                    long dataSize = dataSizeIdx > 0 ? rs.getLong(dataSizeIdx) : -1L;
+                    return Optional.of(new DorisTableStats(rowCount, dataSize));
+                }
+                return Optional.empty();
+            }
+        }
+    }
+
+    private Map<String, DorisColumnStats> fetchColumnStatsInternal(Connection conn, String db, String table,
+                                                                   List<String> cols) throws SQLException {
+        StringBuilder sql = new StringBuilder("SHOW COLUMN STATS ")
+                .append(quoteIdent(db)).append(".").append(quoteIdent(table));
+        if (cols != null && !cols.isEmpty()) {
+            sql.append(" (");
+            for (int i = 0; i < cols.size(); i++) {
+                if (i > 0) {
+                    sql.append(", ");
+                }
+                sql.append(quoteIdent(cols.get(i)));
+            }
+            sql.append(")");
+        }
+        int queryTimeoutS;
+        try {
+            queryTimeoutS = Math.max(1, config.getValue(DorisOptions.DORIS_STATS_JDBC_SOCKET_TIMEOUT_MS) / 1000);
+        } catch (OptionRequiredException e) {
+            queryTimeoutS = 5;
+        }
+        try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            ps.setQueryTimeout(queryTimeoutS);
+            try (ResultSet rs = ps.executeQuery()) {
+                return parseColumnStats(rs);
+            }
+        }
+    }
+
+    /**
+     * Parse {@code SHOW COLUMN STATS} result set, handling the multi-row-per-column case.
+     *
+     * <p>Doris 2.1+ may return one row per (column, index_name). When {@code index_name}
+     * column exists, prefer the row whose {@code index_name} is empty/null (base index).
+     * Otherwise, keep the row with the largest {@code data_size}.
+     * Never sum data_size across rows.
+     */
+    private Map<String, DorisColumnStats> parseColumnStats(ResultSet rs) throws SQLException {
+        ResultSetMetaData md = rs.getMetaData();
+        int colNameIdx = -1;
+        int ndvIdx = -1;
+        int numNullsIdx = -1;
+        int dataSizeIdx = -1;
+        int avgSizeIdx = -1;
+        int minIdx = -1;
+        int maxIdx = -1;
+        int indexNameIdx = -1;
+        for (int i = 1; i <= md.getColumnCount(); i++) {
+            String col = md.getColumnName(i);
+            switch (col.toLowerCase()) {
+                case "column_name": colNameIdx = i; break;
+                case "ndv":         ndvIdx = i; break;
+                case "num_nulls":   numNullsIdx = i; break;
+                case "data_size":   dataSizeIdx = i; break;
+                case "avg_size_byte": avgSizeIdx = i; break;
+                case "min":         minIdx = i; break;
+                case "max":         maxIdx = i; break;
+                case "index_name":  indexNameIdx = i; break;
+                default: break;
+            }
+        }
+        if (colNameIdx == -1) {
+            return Collections.emptyMap();
+        }
+        // column -> (isBaseIndex, data_size, stats)
+        Map<String, DorisColumnStats> picked = new HashMap<>();
+        Map<String, Long> pickedDataSize = new HashMap<>();
+        Map<String, Boolean> pickedIsBase = new HashMap<>();
+        while (rs.next()) {
+            String colName = rs.getString(colNameIdx);
+            if (colName == null) {
+                continue;
+            }
+            long ndv = ndvIdx > 0 ? safeLong(rs, ndvIdx) : -1L;
+            long numNulls = numNullsIdx > 0 ? safeLong(rs, numNullsIdx) : -1L;
+            long dataSize = dataSizeIdx > 0 ? safeLong(rs, dataSizeIdx) : -1L;
+            double avgSize = avgSizeIdx > 0 ? safeDouble(rs, avgSizeIdx) : -1d;
+            String minLit = minIdx > 0 ? rs.getString(minIdx) : null;
+            String maxLit = maxIdx > 0 ? rs.getString(maxIdx) : null;
+            String indexName = indexNameIdx > 0 ? rs.getString(indexNameIdx) : null;
+            boolean isBase = StringUtils.isBlank(indexName);
+
+            Boolean prevBase = pickedIsBase.get(colName);
+            if (prevBase == null) {
+                // first row for this column
+                picked.put(colName, new DorisColumnStats(colName, ndv, numNulls, dataSize, avgSize, minLit, maxLit));
+                pickedDataSize.put(colName, dataSize);
+                pickedIsBase.put(colName, isBase);
+            } else {
+                // prefer base index; if both same, keep larger data_size
+                boolean shouldReplace = false;
+                if (isBase && !prevBase) {
+                    shouldReplace = true;
+                } else if (isBase == prevBase && dataSize > pickedDataSize.get(colName)) {
+                    shouldReplace = true;
+                }
+                if (shouldReplace) {
+                    picked.put(colName, new DorisColumnStats(colName, ndv, numNulls, dataSize, avgSize, minLit, maxLit));
+                    pickedDataSize.put(colName, dataSize);
+                    pickedIsBase.put(colName, isBase);
+                }
+            }
+        }
+        return picked;
+    }
+
+    private static long safeLong(ResultSet rs, int idx) throws SQLException {
+        long v = rs.getLong(idx);
+        return rs.wasNull() ? -1L : v;
+    }
+
+    private static double safeDouble(ResultSet rs, int idx) throws SQLException {
+        double v = rs.getDouble(idx);
+        return rs.wasNull() ? -1d : v;
+    }
+
+    /** Quote a Doris identifier with backticks, escaping internal backticks. */
+    private static String quoteIdent(String ident) {
+        if (ident == null) {
+            return "``";
+        }
+        return "`" + ident.replace("`", "``") + "`";
     }
 
     public void close() throws IOException {

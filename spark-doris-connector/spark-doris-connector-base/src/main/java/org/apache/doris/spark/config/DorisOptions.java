@@ -148,5 +148,43 @@ public class DorisOptions {
 
     public static final ConfigOption<Boolean> DORIS_SINK_HTTP_UTF8_CHARSET = ConfigOptions.name("doris.sink.http-utf8-charset").booleanType().defaultValue(false).withDescription("");
 
+    // ------------------------------------------------------------------
+    // Statistics: report Doris stats to Spark Catalyst optimizer
+    // ------------------------------------------------------------------
+
+    /** Master switch, opt-in to avoid changing join strategies on upgrade. */
+    public static final ConfigOption<Boolean> DORIS_STATS_ENABLED =
+            ConfigOptions.name("doris.stats.enabled").booleanType().defaultValue(false)
+                    .withDescription("Enable reporting Doris table/column statistics to Spark Catalyst.");
+
+    /** Column-level stats; only Spark 3.4+ consumes them. */
+    public static final ConfigOption<Boolean> DORIS_STATS_COLUMN_ENABLED =
+            ConfigOptions.name("doris.stats.column.enabled").booleanType().defaultValue(true)
+                    .withDescription("Report column-level statistics (Spark 3.4+ consumes them).");
+
+    /** Apply selectivity estimation on pushed filters. */
+    public static final ConfigOption<Boolean> DORIS_STATS_SELECTIVITY_ENABLED =
+            ConfigOptions.name("doris.stats.selectivity.enabled").booleanType().defaultValue(true)
+                    .withDescription("Apply selectivity estimation on pushed filters when reporting stats.");
+
+    /** Lower bound for filter selectivity, guards against stale stats. (0, 1] */
+    public static final ConfigOption<Double> DORIS_STATS_SELECTIVITY_MIN =
+            ConfigOptions.name("doris.stats.selectivity.min").doubleType().defaultValue(0.05d)
+                    .withDescription("Lower bound for filter selectivity in stats estimation.");
+
+    /** Cache TTL (ms) for SHOW TABLE/COLUMN STATS. */
+    public static final ConfigOption<Long> DORIS_STATS_CACHE_TTL_MS =
+            ConfigOptions.name("doris.stats.cache.ttl.ms").longType().defaultValue(300000L)
+                    .withDescription("TTL (ms) for cached Doris statistics.");
+
+    /** JDBC connect timeout (ms) for stats queries. */
+    public static final ConfigOption<Integer> DORIS_STATS_JDBC_CONNECT_TIMEOUT_MS =
+            ConfigOptions.name("doris.stats.jdbc.connect.timeout.ms").intType().defaultValue(3000)
+                    .withDescription("JDBC connect timeout (ms) for stats queries.");
+
+    /** JDBC socket timeout (ms) for stats queries. */
+    public static final ConfigOption<Integer> DORIS_STATS_JDBC_SOCKET_TIMEOUT_MS =
+            ConfigOptions.name("doris.stats.jdbc.socket.timeout.ms").intType().defaultValue(5000)
+                    .withDescription("JDBC socket timeout (ms) for stats queries.");
 
 }
